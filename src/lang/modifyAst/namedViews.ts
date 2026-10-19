@@ -21,12 +21,14 @@ import {
   valueOrVariable,
 } from '@src/lang/queryAst'
 import type {
+  Artifact,
   ArtifactGraph,
   CallExpressionKw,
   Expr,
   PathToNode,
   Program,
 } from '@src/lang/wasm'
+import { getArtifactsMatchingPathToNode } from '@src/lang/std/artifactGraph'
 import { modelingStdLibCall } from '@src/lib/commandBarConfigs/modelingCommandStdLib'
 import type { KclCommandValue } from '@src/lib/commandTypes'
 import { err } from '@src/lib/trap'
@@ -45,7 +47,18 @@ export function isOrientedCameraCall(
   )
 }
 
-function viewEnum(type: string, value: string) {
+function viewEnum(
+  type: string,
+  value: string,
+  previousValue?: string,
+  previousExpression?: Expr | null
+) {
+  // Preserve authored expressions when the selected enum value is unchanged.
+  if (
+    previousExpression &&
+    value.toLowerCase() === previousValue?.toLowerCase()
+  )
+    return previousExpression
   return createLocalName(value, [
     createIdentifier('view'),
     createIdentifier(type),
@@ -68,10 +81,10 @@ export function addNamedView({
   ast: Node<Program>
   artifactGraph: ArtifactGraph
   name: string
-  orientation: Orientation
+  orientation?: Orientation
   target?: KclCommandValue
   distance?: KclCommandValue
-  projection: Projection
+  projection?: Projection
   baseline: Visibility
   except?: Selections
   nodeToEdit?: PathToNode
@@ -81,6 +94,8 @@ export function addNamedView({
   const mNodeToEdit = structuredClone(nodeToEdit)
   const namedCall = modelingStdLibCall('Named View')
 
+  let existingCall: CallExpressionKw | undefined
+  let view: Extract<Artifact, { type: 'namedView' }> | undefined
   if (mNodeToEdit) {
     const result = getNodeFromPath<CallExpressionKw>(
       modifiedAst,
@@ -89,33 +104,68 @@ export function addNamedView({
       'CallExpressionKw'
     )
     if (err(result)) return result
-    const existingCamera = result.node.arguments.find(
-      (argument) => argument.label?.name === 'camera'
-    )?.arg
-    if (!isOrientedCameraCall(existingCamera)) {
-      return new Error('Editing custom cameras is not supported yet.')
-    }
+    existingCall = result.node
+    view = getArtifactsMatchingPathToNode(mNodeToEdit, artifactGraph).find(
+      (artifact): artifact is Extract<Artifact, { type: 'namedView' }> =>
+        artifact.type === 'namedView' &&
+        artifact.codeRef.range[2] === ast.moduleId
+    )
+    if (!view)
+      return new Error('Could not find this named view in the executed model.')
   }
 
-  const camera = createCallExpressionStdLibKw(
-    'oriented',
-    viewEnum('Orientation', orientation),
-    [
-      ...(target ? [createLabeledArg('target', valueOrVariable(target))] : []),
-      ...(distance
-        ? [createLabeledArg('distance', valueOrVariable(distance))]
-        : []),
-      createLabeledArg('projection', viewEnum('Projection', projection)),
-    ],
-    undefined,
-    [createIdentifier('view')]
-  )
-  if (target && 'variableName' in target && target.variableName) {
-    insertVariableAndOffsetPathToNode(target, modifiedAst, mNodeToEdit)
+  const existingCamera = existingCall?.arguments.find(
+    (argument) => argument.label?.name === 'camera'
+  )?.arg
+  const orientedCamera = isOrientedCameraCall(existingCamera)
+    ? existingCamera
+    : undefined
+  let camera = existingCamera
+  // Shared cameras, directed cameras, and custom helpers remain untouched.
+  if (!mNodeToEdit || orientedCamera) {
+    if (!orientation || !projection) {
+      return new Error('Could not determine the named view camera.')
+    }
+    camera = createCallExpressionStdLibKw(
+      'oriented',
+      viewEnum(
+        'Orientation',
+        orientation,
+        view?.camera.look.type === 'oriented'
+          ? view.camera.look.orientation
+          : undefined,
+        orientedCamera?.unlabeled
+      ),
+      [
+        ...(target
+          ? [createLabeledArg('target', valueOrVariable(target))]
+          : []),
+        ...(distance
+          ? [createLabeledArg('distance', valueOrVariable(distance))]
+          : []),
+        createLabeledArg(
+          'projection',
+          viewEnum(
+            'Projection',
+            projection,
+            view?.camera.projection,
+            orientedCamera?.arguments.find(
+              (argument) => argument.label?.name === 'projection'
+            )?.arg
+          )
+        ),
+      ],
+      undefined,
+      [createIdentifier('view')]
+    )
+    if (target && 'variableName' in target && target.variableName) {
+      insertVariableAndOffsetPathToNode(target, modifiedAst, mNodeToEdit)
+    }
+    if (distance && 'variableName' in distance && distance.variableName) {
+      insertVariableAndOffsetPathToNode(distance, modifiedAst, mNodeToEdit)
+    }
   }
-  if (distance && 'variableName' in distance && distance.variableName) {
-    insertVariableAndOffsetPathToNode(distance, modifiedAst, mNodeToEdit)
-  }
+  if (!camera) return new Error('Could not determine the named view camera.')
 
   const exceptVars =
     !mNodeToEdit && except
@@ -137,7 +187,17 @@ export function addNamedView({
     createLiteral(name, wasmInstance),
     [
       createLabeledArg('camera', camera),
-      createLabeledArg('baseline', viewEnum('Visibility', baseline)),
+      createLabeledArg(
+        'baseline',
+        viewEnum(
+          'Visibility',
+          baseline,
+          view?.baseline,
+          existingCall?.arguments.find(
+            (argument) => argument.label?.name === 'baseline'
+          )?.arg
+        )
+      ),
       ...(exceptVars.exprs.length > 0
         ? [createLabeledArg('except', createArrayExpression(exceptVars.exprs))]
         : []),

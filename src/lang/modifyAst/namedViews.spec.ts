@@ -120,7 +120,7 @@ extrude001 = extrude(region001, length = 5mm)`
     ).toBe(true)
   })
 
-  it('edits name and camera while preserving framing expressions and exceptions', async () => {
+  it('preserves unchanged expressions while editing name and camera', async () => {
     const code = `${settings}
 
 sketch001 = sketch(on = XY) {
@@ -176,6 +176,19 @@ view001 = view::named(
       except: undefined,
     })
 
+    const renamed = addNamedView({
+      ast,
+      artifactGraph: execState.artifactGraph,
+      ...defaults,
+      name: 'Renamed view',
+      wasmInstance: instance,
+    })
+    if (err(renamed)) throw renamed
+    const renamedCode = recast(renamed.modifiedAst, instance)
+    expect(renamedCode).toContain('view::oriented(\n    orientation,')
+    expect(renamedCode).toContain('projection = projection')
+    expect(renamedCode).toContain('baseline = baseline')
+
     const result = addNamedView({
       ast,
       artifactGraph: execState.artifactGraph,
@@ -201,7 +214,7 @@ view001 = view::named(
     await enginelessExecutor(result.modifiedAst, rustContext)
   })
 
-  it('rejects editing a custom camera helper', async () => {
+  it('keeps a custom camera helper when editing a view', async () => {
     const code = `${settings}
 fn oriented(@orientation: view::Orientation) {
   return view::oriented(orientation, distance = 123mm)
@@ -223,9 +236,33 @@ view001 = view::named("Inspection view", camera = oriented(view::Orientation::Fr
       code,
       rustContext,
     })
-    expect(event).toEqual(
-      new Error('Editing custom cameras is not supported yet.')
+    if (err(event)) throw event
+    if (event.type !== 'Find and select command') {
+      throw new Error(`Expected an edit command, got ${event.type}`)
+    }
+    expect(event.data.argDefaultValues).toMatchObject({
+      orientation: undefined,
+      projection: undefined,
+    })
+
+    const result = addNamedView({
+      ast,
+      artifactGraph: execState.artifactGraph,
+      ...event.data.argDefaultValues,
+      name: 'Renamed view',
+      baseline: 'Hide',
+      wasmInstance: instance,
+    })
+    if (err(result)) throw result
+    const updatedCode = recast(result.modifiedAst, instance)
+    expect(updatedCode).toContain('camera = oriented(view::Orientation::Front)')
+    expect(updatedCode).toContain('"Renamed view"')
+    expect(updatedCode).toContain('view::Visibility::Hide')
+    const updated = await enginelessExecutor(result.modifiedAst, rustContext)
+    const updatedView = [...updated.artifactGraph.values()].find(
+      (candidate) => candidate.type === 'namedView'
     )
+    expect(updatedView?.camera.distance).toBe(123)
   })
 })
 
