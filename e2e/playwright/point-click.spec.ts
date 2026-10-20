@@ -5897,11 +5897,18 @@ sketch001 = sketch(on = XY) {
   line1 = line(start = [var -10mm, var 0mm], end = [var -10mm, var 20mm])
 }
 region001 = region(segments = [sketch001.circle1])`
+    const oldVersionCode = code.replace('kclVersion = 3.0', 'kclVersion = 2.0')
     await homePage.goToModelingScene()
     await scene.settled()
-    await scene.waitForExecutionDoneAfter(() => editor.replaceCode('', code))
+    await scene.waitForExecutionDoneAfter(() =>
+      editor.replaceCode('', oldVersionCode)
+    )
     await toolbar.openPane(DefaultLayoutPaneID.NamedViews)
     const pane = page.locator(`#${DefaultLayoutPaneID.NamedViews}-pane`)
+    await expect(pane.getByTestId('named-view-create')).toHaveCount(0)
+    await scene.waitForExecutionDoneAfter(() =>
+      editor.replaceCode(oldVersionCode, code)
+    )
     await pane.getByTestId('named-view-create').click()
 
     const dialog = page.getByTestId('modeling-dialog')
